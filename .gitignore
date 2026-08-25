@@ -1,0 +1,21 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+
+# data + DB are local
+db/cards.db
+db/cards.db-*
+data/raw/
+data/manual/
+data/scrape_index.json
+data/scrape_status.json
+
+# Playwright browsers (large)
+.playwright/
+
+# Local scrape logs
+data/_download_log*.txt

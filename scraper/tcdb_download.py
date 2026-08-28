@@ -31,8 +31,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from parsers.tcdb_html import parse_tcdb_html
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -51,7 +54,6 @@ VIEWSET_URL = BASE + "/ViewSet.cfm/sid/{sid}"
 
 MAX_PAGES = 60  # safety cap; base sets are a handful of pages
 
-_PERSON_RE = re.compile(r"/Person\.cfm/pid/\d+", re.IGNORECASE)
 _404_MARKER = "DefaultError404"
 
 
@@ -96,12 +98,33 @@ def _get(url: str, timeout: int = 30) -> tuple[str, str]:
         return resp.geturl(), raw.decode("utf-8", errors="ignore")
 
 
+def _get_retrying(url: str, *, max_retries: int = 5, base_backoff: float = 20.0) -> tuple[str, str]:
+    """_get with exponential backoff on HTTP 429 (TCDB rate-limiting).
+
+    A 429 is transient — TCDB throttles bursts but recovers. Rather than fail
+    the whole set, sleep (honoring Retry-After when present) and retry the same
+    page. Backoff grows 20s, 40s, 80s, … Raises the last error if all retries
+    are exhausted or the error isn't a 429.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return _get(url)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == max_retries:
+                raise
+            retry_after = e.headers.get("Retry-After") if e.headers else None
+            try:
+                wait = float(retry_after) if retry_after else base_backoff * (2 ** attempt)
+            except ValueError:
+                wait = base_backoff * (2 ** attempt)
+            wait = min(wait, 180.0)
+            print(f"    429 — backing off {wait:.0f}s (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+            time.sleep(wait)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 def _is_404(final_url: str, html: str) -> bool:
     return _404_MARKER in final_url or "404 - Page Not Found" in html
-
-
-def _person_count(html: str) -> int:
-    return len(_PERSON_RE.findall(html))
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +158,7 @@ def _clear_old_pages(job: DownloadJob) -> None:
             pass
 
 
-def download_set(job: DownloadJob, page_delay: float = 1.5) -> tuple[str, str]:
+def download_set(job: DownloadJob, page_delay: float = 3.0) -> tuple[str, str]:
     """Download every checklist page for one set. Returns (status, message)."""
     slug = job.slug or resolve_slug(job.sid)
     if not slug:
@@ -147,9 +170,12 @@ def download_set(job: DownloadJob, page_delay: float = 1.5) -> tuple[str, str]:
 
     total_cards = 0
     for page in range(1, MAX_PAGES + 1):
-        url = CHECKLIST_URL.format(sid=job.sid, slug=slug) + f"?PageIndex={page}"
+        # Percent-encode the slug so non-ASCII chars (e.g. the é in "Béisbol")
+        # don't blow up urllib's ascii-only request line. safe="" so any
+        # already-raw non-ASCII byte is encoded; ASCII slugs are unchanged.
+        url = CHECKLIST_URL.format(sid=job.sid, slug=quote(slug, safe="-_./")) + f"?PageIndex={page}"
         try:
-            final_url, html = _get(url)
+            final_url, html = _get_retrying(url)
         except urllib.error.HTTPError as e:
             return "failed", f"HTTP {e.code} on page {page}"
         except Exception as e:  # noqa: BLE001
@@ -159,14 +185,20 @@ def download_set(job: DownloadJob, page_delay: float = 1.5) -> tuple[str, str]:
             if page == 1:
                 return "failed", "checklist 404 (bad slug/sid)"
             break  # past the last page
-        n = _person_count(html)
-        if n == 0:
-            break  # past the last page (200 but empty)
+        # Stop on the first page with no real checklist rows. We parse for
+        # actual card rows rather than counting raw /Person.cfm links: for small
+        # subset sets, TCDB serves a nav-only page (still full of Person.cfm
+        # sidebar links) for any out-of-range PageIndex, so a raw link count
+        # never reaches zero and the loop would run to MAX_PAGES (hammering the
+        # server into 429s). Parsed card rows are the true end-of-set signal.
+        cards = parse_tcdb_html(html)
+        if not cards:
+            break
 
         path = job.page_path(page)
         path.write_text(html, encoding="utf-8")
         job.pages.append(path)
-        total_cards += n
+        total_cards += len(cards)
         if page < MAX_PAGES:
             time.sleep(page_delay)
 

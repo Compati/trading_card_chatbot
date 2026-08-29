@@ -169,6 +169,7 @@ def download_set(job: DownloadJob, page_delay: float = 3.0) -> tuple[str, str]:
     _clear_old_pages(job)
 
     total_cards = 0
+    seen_numbers: set[str] = set()  # card numbers gathered so far, for dup-page detection
     for page in range(1, MAX_PAGES + 1):
         # Percent-encode the slug so non-ASCII chars (e.g. the é in "Béisbol")
         # don't blow up urllib's ascii-only request line. safe="" so any
@@ -194,6 +195,18 @@ def download_set(job: DownloadJob, page_delay: float = 3.0) -> tuple[str, str]:
         cards = parse_tcdb_html(html)
         if not cards:
             break
+
+        # Duplicate-page guard: for some sets (e.g. slugs containing '&'/parens)
+        # and under bulk load, TCDB ignores an out-of-range PageIndex and re-serves
+        # page 1's rows instead of the empty/redirect stop page — so `cards` is
+        # non-empty on every page and the loop runs to MAX_PAGES, writing dozens of
+        # identical pages that later inflate the DB (each row is inserted, not
+        # deduped). A real next page always introduces new card numbers; a page
+        # that introduces none is a repeat → end of set.
+        page_numbers = {c.card_number for c in cards if getattr(c, "card_number", None)}
+        if page > 1 and page_numbers and page_numbers <= seen_numbers:
+            break
+        seen_numbers |= page_numbers
 
         path = job.page_path(page)
         path.write_text(html, encoding="utf-8")

@@ -197,14 +197,16 @@ def download_set(job: DownloadJob, page_delay: float = 3.0) -> tuple[str, str]:
             break
 
         # Duplicate-page guard: for some sets (e.g. slugs containing '&'/parens)
-        # and under bulk load, TCDB ignores an out-of-range PageIndex and re-serves
-        # page 1's rows instead of the empty/redirect stop page — so `cards` is
-        # non-empty on every page and the loop runs to MAX_PAGES, writing dozens of
-        # identical pages that later inflate the DB (each row is inserted, not
-        # deduped). A real next page always introduces new card numbers; a page
-        # that introduces none is a repeat → end of set.
+        # and under bulk load, TCDB ignores an out-of-range PageIndex and doesn't
+        # serve the empty/redirect stop page — instead it re-serves page 1's rows,
+        # or a nav-only page whose few parsed rows have no real card number. Either
+        # way `cards` stays non-empty and the loop would run to MAX_PAGES, writing
+        # junk pages that later inflate the DB (each row is inserted, not deduped).
+        # A real next page always introduces NEW card numbers; a page that adds
+        # none — because they all repeat, or because it has no real numbers at all
+        # — is the end of the set.
         page_numbers = {c.card_number for c in cards if getattr(c, "card_number", None)}
-        if page > 1 and page_numbers and page_numbers <= seen_numbers:
+        if page > 1 and not (page_numbers - seen_numbers):
             break
         seen_numbers |= page_numbers
 

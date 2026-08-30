@@ -25,8 +25,8 @@ load_dotenv()
 
 MODELS = {
     "Haiku 4.5 — fastest & cheapest": "claude-haiku-4-5",
-    "Sonnet 4.6 — balanced": "claude-sonnet-4-6",
-    "Opus 4.7 — most capable": "claude-opus-4-7",
+    "Sonnet 5 — balanced": "claude-sonnet-5",
+    "Opus 5 — most capable": "claude-opus-5",
 }
 
 MAX_TOOL_ITERATIONS = 8  # safety guard against tool-call loops

@@ -10,6 +10,7 @@ The app dispatches each tool_use block by name to the matching function.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import sqlite3
 import sys
@@ -21,6 +22,56 @@ from parsers.normalize import normalize_player_name
 
 def _rows(conn, sql: str, params: tuple = ()) -> list[dict]:
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+# Minimum similarity (0-1) for a fuzzy player match to be offered. Tuned so
+# realistic typos ("Mahoms", "Wembanyma") match but unrelated strings don't.
+_FUZZY_CUTOFF = 0.72
+
+
+def _fuzzy_score(query_norm: str, full_norm: str) -> float:
+    """Best difflib similarity between the (normalized) query and a stored name.
+
+    Takes the max of the whole-string ratio and every query-token vs name-token
+    ratio, so a last-name-only typo ("mahoms") still scores against the matching
+    token ("mahomes") even though the full stored name is "patrick mahomes".
+    """
+    best = difflib.SequenceMatcher(None, query_norm, full_norm).ratio()
+    q_tokens = query_norm.split()
+    n_tokens = full_norm.split()
+    for qt in q_tokens:
+        for nt in n_tokens:
+            r = difflib.SequenceMatcher(None, qt, nt).ratio()
+            if r > best:
+                best = r
+    return best
+
+
+def _fuzzy_player_search(conn, name: str, sport: str | None, limit: int) -> list[dict]:
+    """Last-resort typo-tolerant match: score every player's normalized name and
+    keep those at/above the cutoff. Only called when FTS + LIKE both miss."""
+    query_norm = normalize_player_name(name)
+    if not query_norm:
+        return []
+    sql = (
+        "SELECT p.id, p.full_name, p.normalized_name, s.name AS sport, "
+        "       (SELECT COUNT(*) FROM cards c WHERE c.player_id = p.id) AS card_count "
+        "FROM players p JOIN sports s ON s.id = p.sport_id"
+    )
+    params: list[Any] = []
+    if sport:
+        sql += " WHERE s.name = ?"
+        params.append(sport)
+    scored: list[tuple[float, dict]] = []
+    for row in conn.execute(sql, tuple(params)):
+        d = dict(row)
+        norm = d.pop("normalized_name") or ""
+        score = _fuzzy_score(query_norm, norm)
+        if score >= _FUZZY_CUTOFF:
+            scored.append((score, d))
+    # Best similarity first, then most cards as a tiebreak.
+    scored.sort(key=lambda t: (round(t[0], 3), t[1]["card_count"]), reverse=True)
+    return [d for _s, d in scored[:limit]]
 
 
 # ---------- Tool implementations ----------
@@ -64,6 +115,14 @@ def search_player(name: str, sport: str | None = None, limit: int = 10) -> dict:
             sql2 += " ORDER BY card_count DESC LIMIT ?"
             params2.append(limit)
             rows = _rows(conn, sql2, tuple(params2))
+
+        # Tier 3: typo-tolerant fuzzy match. FTS is prefix-tolerant but not
+        # typo-tolerant ("Mahoms" misses "Mahomes"), and LIKE needs a contiguous
+        # substring. Only reached when both exact paths return nothing.
+        if not rows:
+            fuzzy = _fuzzy_player_search(conn, name, sport, limit)
+            if fuzzy:
+                return {"matches": fuzzy, "query": name, "sport": sport, "fuzzy": True}
 
         return {"matches": rows, "query": name, "sport": sport}
     finally:
@@ -204,15 +263,6 @@ def search_sets(query: str | None = None, year: int | None = None, sport: str | 
         if brand:
             where.append("b.name = ?")
             params.append(brand)
-        if is_auto is not None:
-            where.append("c.is_auto = ?")
-            params.append(int(is_auto))
-        if is_relic is not None:
-            where.append("c.is_relic = ?")
-            params.append(int(is_relic))
-        if is_rookie is not None:
-            where.append("c.is_rookie = ?")
-            params.append(int(is_rookie))
         where_sql = " AND ".join(where)
         sql = (
             "SELECT s.id AS set_id, s.year, s.name AS set_name, b.name AS brand, sp.name AS sport, "
@@ -290,8 +340,12 @@ TOOL_SCHEMAS = [
         "name": "search_player",
         "description": (
             "Find players by name. Returns the player_id you'll pass to other tools. "
+            "Tolerant of case, partial names, and minor misspellings. "
             "If multiple players match, ask the user which one they meant or pick the one "
-            "with the most cards. Use this BEFORE cards_for_player / sets_for_player / count_cards."
+            "with the most cards. If the result has \"fuzzy\": true, the name was matched "
+            "approximately (the exact spelling wasn't found) — confirm with the user "
+            "(e.g. 'Did you mean Patrick Mahomes?') before relying on it. "
+            "Use this BEFORE cards_for_player / sets_for_player / count_cards."
         ),
         "input_schema": {
             "type": "object",

@@ -17,5 +17,5 @@ data/scrape_status.json
 # Playwright browsers (large)
 .playwright/
 
-# Local scrape logs
-data/_download_log*.txt
+# Local scrape/scratch logs (download, ingest, measurement runs)
+data/_*.txt

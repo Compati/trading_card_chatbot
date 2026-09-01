@@ -23,7 +23,9 @@ _NOISE_PATTERN = re.compile(
 )
 
 # Patterns inside parallel-name strings that tell us serial numbering / print run.
-_PRINT_RUN_PATTERN = re.compile(r"/(\d{1,5})\b")
+# TCDB writes serials two ways: "/99" and its own "SN99" convention (e.g.
+# "SN250 Silver", "AU, SN1 Black"). Match either; digits must follow immediately.
+_PRINT_RUN_PATTERN = re.compile(r"(?:/\s*|\bSN)(\d{1,5})\b", re.IGNORECASE)
 
 # Quick membership tests for parallel-text flags.
 _AUTO_TOKENS = ("auto", "autograph", "signature")

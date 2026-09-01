@@ -40,11 +40,52 @@ BRAND_PATTERNS = [
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
+# Rival manufacturers whose products slip into discovery because their set names
+# share a word with a Panini sub-brand (e.g. "Topps Pristine", "Leaf Trinity
+# Pristine", "Topps Triple Threads" -> matched "Pristine"/"Threads"). We reject a
+# set only when the maker is the LEADING product token (after an optional year),
+# never on a mere substring — otherwise legitimate Panini subsets that merely
+# contain an ambiguous word ("Rookie Ticket Wild Card Round", "RPS ... Prime
+# Onyx") would be wrongly dropped.
+_RIVAL_MAKERS = [
+    "Topps", "Bowman", "Leaf", "Fleer", "Upper Deck", "Sage", "Press Pass",
+    "Goodwin", "Goudey", "Sportkings", "Sports Kings", "Donruss Americana",
+]
+# These read as Panini parallels/subsets when bare, but as a rival product when
+# they lead a year-prefixed set name ("2024 Onyx Limited Edition ...").
+_RIVAL_MAKERS_YEAR_ONLY = ["Onyx", "Wild Card"]
+
+_LEADING_YEAR_RE = re.compile(r"^\s*(?:19|20)\d\d(?:-\d\d)?\s+", re.IGNORECASE)
+
+
+def is_non_panini(set_name: str) -> str | None:
+    """Return the rival maker name if set_name is a non-Panini product, else None.
+
+    Matches only when the maker is the leading token (after an optional leading
+    year), so ambiguous words appearing mid-name in real Panini subsets are kept.
+    """
+    had_year = bool(_LEADING_YEAR_RE.match(set_name))
+    rest = _LEADING_YEAR_RE.sub("", set_name, count=1).strip()
+    for mk in _RIVAL_MAKERS:
+        if re.match(rf"{re.escape(mk)}\b", rest, re.IGNORECASE):
+            return mk
+    if had_year:
+        for mk in _RIVAL_MAKERS_YEAR_ONLY:
+            if re.match(rf"{re.escape(mk)}\b", rest, re.IGNORECASE):
+                return mk
+    return None
+
 
 def detect_brand(set_name: str) -> str:
-    """Return the most-specific Panini sub-brand mentioned in set_name."""
+    """Return the most-specific Panini sub-brand mentioned in set_name.
+
+    Substring (not word-boundary) match on purpose: Panini subset names routinely
+    pluralize/possessive the brand word ("Canton Absolutes", "Draft Picks Prizms",
+    "Diamond Kings"), which a \\bbrand\\b match would miss and mislabel "Panini".
+    """
+    low = set_name.lower()
     for brand in BRAND_PATTERNS:
-        if brand.lower() in set_name.lower():
+        if brand.lower() in low:
             return brand
     return "Panini"
 
@@ -130,6 +171,10 @@ def _load_set(conn, *, brand: str, sport: str, year: int, set_name: str,
 def _ingest_tcdb_set(conn, html_paths: list[Path], sport: str, year: int,
                      set_name: str, sid: int, source_url: str | None) -> int:
     """Parse every downloaded page for one set and load the merged cards."""
+    rival = is_non_panini(set_name)
+    if rival:
+        print(f"  ~ skipping non-Panini set sid={sid}: {set_name!r} ({rival})")
+        return 0
     cards: list[ParsedCard] = []
     for path in sorted(html_paths, key=_page_sort_key):
         cards.extend(parse_file(path))

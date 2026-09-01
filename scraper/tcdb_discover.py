@@ -60,6 +60,26 @@ PANINI_BRAND_NAMES = [
     "kaboom", "downtown", "downtowns",
 ]
 
+# Rival manufacturers whose set names share a word with a Panini sub-brand
+# ("Topps Pristine", "Leaf Trinity Pristine", "Topps Triple Threads"). Rejected
+# only when the maker LEADS the name (after an optional year) so ambiguous words
+# mid-name in real Panini subsets ("... Wild Card Round", "... Prime Onyx") stay.
+_RIVAL_MAKERS = [
+    "topps", "bowman", "leaf", "fleer", "upper deck", "sage", "press pass",
+    "goodwin", "goudey", "sportkings", "sports kings",
+]
+_RIVAL_MAKERS_YEAR_ONLY = ["onyx", "wild card"]
+_LEADING_YEAR_RE = re.compile(r"^\s*(?:19|20)\d\d(?:-\d\d)?\s+", re.IGNORECASE)
+
+
+def _is_rival_set(name: str) -> bool:
+    lname = name.lower()
+    had_year = bool(_LEADING_YEAR_RE.match(lname))
+    rest = _LEADING_YEAR_RE.sub("", lname, count=1).strip()
+    makers = _RIVAL_MAKERS + (_RIVAL_MAKERS_YEAR_ONLY if had_year else [])
+    return any(re.match(rf"{re.escape(mk)}\b", rest) for mk in makers)
+
+
 _VIEWSET_RE = re.compile(r"/ViewSet\.cfm/sid/(\d+)/([^\"'?<>\s]+)", re.IGNORECASE)
 
 
@@ -73,6 +93,8 @@ class IndexEntry:
 
 
 def _is_panini_set(name: str) -> bool:
+    if _is_rival_set(name):
+        return False
     lname = name.lower()
     return any(brand in lname for brand in PANINI_BRAND_NAMES)
 

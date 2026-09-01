@@ -100,6 +100,11 @@ def _parse_by_links(soup: BeautifulSoup) -> list[ParsedCard]:
         )
 
         display = clean_display_name(raw_player)
+        # TCDB packs the parallel/variation descriptor into the player cell,
+        # trailing the player anchor: "<a>Arch Manning</a> SN49 Burnt Orange".
+        # Everything after the anchor name is the parallel label ("Base",
+        # "SN250 Silver", "AU, SN1 Black"); an empty tail = a plain base card.
+        parallel = _parallel_from_cell(player_context, raw_player)
         flags = detect_flags(player_context, card_number or "")
         parsed.append(
             ParsedCard(
@@ -107,13 +112,31 @@ def _parse_by_links(soup: BeautifulSoup) -> list[ParsedCard]:
                 player_display=display,
                 player_normalized=normalize_player_name(display),
                 team=team,
-                parallel_name=None,   # base checklists carry no parallel column
-                print_run=extract_print_run(player_context),
+                parallel_name=parallel,
+                print_run=extract_print_run(parallel or player_context),
                 flags=flags,
                 notes=None,
             )
         )
     return parsed
+
+
+def _parallel_from_cell(player_context: str, raw_player: str) -> str | None:
+    """The parallel label is the player-cell text after the player's name.
+
+    ``player_context`` is the full cell ("Arch Manning SN49 Burnt Orange");
+    ``raw_player`` is the anchor text ("Arch Manning"). Strip the name prefix and
+    any leading separators. Returns None for a bare base card (no trailing text).
+    """
+    if not player_context or not raw_player:
+        return None
+    # Only extract when the anchor name is a clean prefix of the cell. If it
+    # isn't (unexpected markup), don't guess — returning None keeps the old
+    # behavior rather than dumping the player's name into parallel_name.
+    if not player_context.startswith(raw_player):
+        return None
+    tail = player_context[len(raw_player):].lstrip(" ,-–—")  # sep chars
+    return tail.strip() or None
 
 
 def _card_number_from_row(tr) -> str | None:

@@ -72,7 +72,7 @@ _RIVAL_MAKERS = [
     # "Bonnier Books ... Elite Edition"). Rejected only when they LEAD the name.
     "futera", "black lab", "bonnier",
 ]
-_RIVAL_MAKERS_YEAR_ONLY = ["onyx", "wild card"]
+_RIVAL_MAKERS_YEAR_ONLY = ["onyx", "wild card", "uno"]
 _LEADING_YEAR_RE = re.compile(r"^\s*(?:19|20)\d\d(?:-\d\d)?\s+", re.IGNORECASE)
 
 

@@ -67,6 +67,10 @@ PANINI_BRAND_NAMES = [
 _RIVAL_MAKERS = [
     "topps", "bowman", "leaf", "fleer", "upper deck", "sage", "press pass",
     "goodwin", "goudey", "sportkings", "sports kings",
+    # non-Panini soccer makers whose names contain a Panini brand word
+    # ("Futera ... Selection"/"Selecta" -> select; "Black Lab ... Limited";
+    # "Bonnier Books ... Elite Edition"). Rejected only when they LEAD the name.
+    "futera", "black lab", "bonnier",
 ]
 _RIVAL_MAKERS_YEAR_ONLY = ["onyx", "wild card"]
 _LEADING_YEAR_RE = re.compile(r"^\s*(?:19|20)\d\d(?:-\d\d)?\s+", re.IGNORECASE)

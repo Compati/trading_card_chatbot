@@ -47,13 +47,31 @@ copy .env.example .env
 
 Open `.env` and replace the placeholder with your real key.
 
-### 4. Initialize the database
+### 4. Get the database
 
-```powershell
-python -m db.connection init
+`db/cards.db` is **not** committed to git — it grew toward GitHub's 100 MB
+single-file limit and bloated history. It's published as a **GitHub Release
+asset** (`cards.db` on the rolling `db-latest` release) and pulled on demand.
+
+Fetch the current build (public repo, no auth needed):
+
+```bash
+bash scripts/fetch_db.sh          # set FORCE=1 to overwrite an existing copy
 ```
 
-Creates `db/cards.db` with the schema.
+Or start an empty schema instead: `python -m db.connection init`.
+
+In **Codespaces** this fetch runs automatically on container create (see
+`.devcontainer/devcontainer.json`), so the app comes up with data.
+
+**After a data update**, republish the DB so deploys pick it up:
+
+```bash
+.venv/Scripts/python.exe scripts/publish_db.py
+```
+
+(Uploads `db/cards.db` to the `db-latest` release. Auth comes from
+`$GITHUB_TOKEN`, `gh auth token`, or your existing git credential.)
 
 ---
 

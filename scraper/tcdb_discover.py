@@ -44,6 +44,7 @@ SPORT_URL_NAMES = {
     "racing": "Racing",
     "wwe": "Wrestling",
     "ufc": "MMA",
+    "golf": "Golf",
 }
 
 # Panini's brand families — we filter listings down to sets named with one of these.

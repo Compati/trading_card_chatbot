@@ -282,7 +282,7 @@ def set_details(set_id: int, sample_players: int = 15) -> dict:
     try:
         head = conn.execute(
             "SELECT s.id, s.year, s.name, b.name AS brand, sp.name AS sport, "
-            "       s.source, s.source_url, s.ingested_at, "
+            "       s.source, s.source_url, s.ingested_at, s.parent_set_id, "
             "       (SELECT COUNT(*) FROM cards c WHERE c.set_id = s.id) AS card_count, "
             "       (SELECT COUNT(DISTINCT player_id) FROM cards c WHERE c.set_id = s.id) AS player_count "
             "FROM sets s JOIN brands b ON b.id=s.brand_id JOIN sports sp ON sp.id=s.sport_id "
@@ -297,7 +297,42 @@ def set_details(set_id: int, sample_players: int = 15) -> dict:
             "WHERE c.set_id = ? ORDER BY p.full_name LIMIT ?",
             (set_id, sample_players),
         )
-        return {"set": dict(head), "sample_players": players}
+        out: dict[str, Any] = {"set": dict(head), "sample_players": players}
+
+        # Hierarchy: a "product" (base set) owns subset/insert/parallel rows via
+        # parent_set_id. Roll the whole family up so a question about the product
+        # covers all its inserts/autos/mem cards, not just the base checklist.
+        # If this IS a subset, the product is its parent; otherwise it's itself.
+        product_id = head["parent_set_id"] or head["id"]
+        if head["parent_set_id"]:
+            parent = conn.execute("SELECT id, name FROM sets WHERE id=?", (product_id,)).fetchone()
+            out["parent_product"] = dict(parent) if parent else None
+        subsets = _rows(
+            conn,
+            "SELECT s.id, s.name, (SELECT COUNT(*) FROM cards c WHERE c.set_id=s.id) AS card_count "
+            "FROM sets s WHERE s.parent_set_id = ? ORDER BY s.name",
+            (product_id,),
+        )
+        if subsets:
+            fam = conn.execute(
+                "SELECT COUNT(*) AS cards, "
+                "       COUNT(DISTINCT c.player_id) AS players, "
+                "       COALESCE(SUM(c.is_auto),0) AS autos, "
+                "       COALESCE(SUM(c.is_relic),0) AS relics "
+                "FROM cards c JOIN sets s ON s.id=c.set_id "
+                "WHERE s.id = ?1 OR s.parent_set_id = ?1",
+                (product_id,),
+            ).fetchone()
+            out["product_family"] = {
+                "product_set_id": product_id,
+                "subset_count": len(subsets),
+                "total_cards": fam["cards"],
+                "total_players": fam["players"],
+                "total_autos": fam["autos"],
+                "total_relics": fam["relics"],
+                "subsets": subsets,
+            }
+        return out
     finally:
         conn.close()
 
@@ -369,7 +404,12 @@ TOOL_SCHEMAS = [
                 "player_id": {"type": "integer"},
                 "year": {"type": "integer"},
                 "brand": {"type": "string"},
-                "set_name": {"type": "string"},
+                "set_name": {"type": "string", "description": (
+                    "Partial set name (substring match). Subset names begin with their parent "
+                    "product, e.g. '2022 Panini Chronicles Draft Picks - Prestige', so passing the "
+                    "product name ('Chronicles Draft Picks') returns the WHOLE product family — the "
+                    "base plus every insert/parallel/auto/mem subset. Pass a more specific string to "
+                    "narrow to one subset.")},
                 "parallel_contains": {"type": "string"},
                 "is_auto": {"type": "boolean", "description": "Filter to autograph cards when true"},
                 "is_relic": {"type": "boolean", "description": "Filter to relic/patch cards when true"},
@@ -429,7 +469,12 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "set_details",
-        "description": "Return metadata + total card count + sample players for one set.",
+        "description": (
+            "Return metadata + total card count + sample players for one set. If the set is a "
+            "product (base) with subsets, also returns a 'product_family' rollup: subset list and "
+            "combined card/auto/relic totals across the base + all its inserts/parallels. If the "
+            "set is itself a subset, returns its 'parent_product' plus the family rollup. Use this "
+            "to answer 'what's in <product>' or 'how many autos/mem cards in <product>'."),
         "input_schema": {
             "type": "object",
             "properties": {

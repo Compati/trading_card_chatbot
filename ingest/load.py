@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from db.connection import get_connection, get_or_create
+from ingest.fix_set_names import title_from_html
 from parsers.tcdb_html import ParsedCard, parse_file
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,7 +54,9 @@ _RIVAL_MAKERS = [
 ]
 # These read as Panini parallels/subsets when bare, but as a rival product when
 # they lead a year-prefixed set name ("2024 Onyx Limited Edition ...").
-_RIVAL_MAKERS_YEAR_ONLY = ["Onyx", "Wild Card"]
+# "Uno" is the UNO card game (e.g. "2024 UNO Elite Core Edition"), not a Panini
+# trading-card product.
+_RIVAL_MAKERS_YEAR_ONLY = ["Onyx", "Wild Card", "Uno"]
 
 _LEADING_YEAR_RE = re.compile(r"^\s*(?:19|20)\d\d(?:-\d\d)?\s+", re.IGNORECASE)
 
@@ -95,6 +98,20 @@ def detect_year(set_name: str, fallback: int) -> int:
     return int(m.group(0)) if m else fallback
 
 
+_LEADING_YEAR_INT_RE = re.compile(r"^\s*((?:19|20)\d\d)")
+
+
+def leading_year(name: str) -> int | None:
+    """The product/release year at the START of a full TCDB title.
+
+    TCDB titles begin with the release year ("2023 Clearly Donruss - Retro
+    1993", "2022-23 Panini Flawless - ..."), so the leading year is the product
+    year even when the subset name embeds an older theme year. Returns None if
+    the name has no leading year (e.g. a bare subset name)."""
+    m = _LEADING_YEAR_INT_RE.match(name or "")
+    return int(m.group(1)) if m else None
+
+
 def _load_status() -> dict:
     if STATUS_PATH.exists():
         return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
@@ -130,17 +147,27 @@ def _load_set(conn, *, brand: str, sport: str, year: int, set_name: str,
     brand_id = get_or_create(conn, "brands", {"name": brand})
 
     # Find or create the set; if it exists, wipe its cards first (idempotency).
-    row = conn.execute(
-        "SELECT id FROM sets WHERE brand_id=? AND sport_id=? AND year=? AND name=?",
-        (brand_id, sport_id, year, set_name),
-    ).fetchone()
+    # Prefer the stable TCDB set id as the identity key: matching on
+    # (brand,name) meant that any rename on re-ingest orphaned the old row and
+    # created a duplicate. Keying on tcdb_sid lets a re-ingest refresh the row's
+    # name/brand/year in place. Legacy rows without a tcdb_sid fall back to the
+    # old (brand,sport,year,name) match.
+    row = None
+    if tcdb_sid is not None:
+        row = conn.execute("SELECT id FROM sets WHERE tcdb_sid=?", (tcdb_sid,)).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT id FROM sets WHERE brand_id=? AND sport_id=? AND year=? AND name=?",
+            (brand_id, sport_id, year, set_name),
+        ).fetchone()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     if row:
         set_id = row["id"]
         conn.execute("DELETE FROM cards WHERE set_id=?", (set_id,))
         conn.execute(
-            "UPDATE sets SET source=?, source_url=?, source_file=?, tcdb_sid=?, ingested_at=? WHERE id=?",
-            (source, source_url, source_file, tcdb_sid, now, set_id),
+            "UPDATE sets SET name=?, brand_id=?, year=?, source=?, source_url=?, "
+            "source_file=?, tcdb_sid=?, ingested_at=? WHERE id=?",
+            (set_name, brand_id, year, source, source_url, source_file, tcdb_sid, now, set_id),
         )
     else:
         cur = conn.execute(
@@ -171,22 +198,35 @@ def _load_set(conn, *, brand: str, sport: str, year: int, set_name: str,
 def _ingest_tcdb_set(conn, html_paths: list[Path], sport: str, year: int,
                      set_name: str, sid: int, source_url: str | None) -> int:
     """Parse every downloaded page for one set and load the merged cards."""
-    rival = is_non_panini(set_name)
+    ordered = sorted(html_paths, key=_page_sort_key)
+    # The DISPLAY name comes from the checklist page <title>, which carries the
+    # full parent product ("2022 Panini Chronicles Draft Picks - Prestige") that
+    # the bare subset index name drops. Falls back to the index name.
+    display_name = title_from_html(ordered[0].read_text(encoding="utf-8", errors="replace")) or set_name
+    # Rival check runs on the FULL title, not the bare name: a rival product's
+    # subsets ("2025 Leaf Optichrome - Aquatic Autographs ...") have bare index
+    # names with no maker word, so only the title reveals them as non-Panini.
+    rival = is_non_panini(display_name) or is_non_panini(set_name)
     if rival:
-        print(f"  ~ skipping non-Panini set sid={sid}: {set_name!r} ({rival})")
+        print(f"  ~ skipping non-Panini set sid={sid}: {display_name!r} ({rival})")
         return 0
     cards: list[ParsedCard] = []
-    for path in sorted(html_paths, key=_page_sort_key):
+    for path in ordered:
         cards.extend(parse_file(path))
     if not cards:
         print(f"  ! no cards parsed from sid={sid} ({len(html_paths)} file(s))")
         return 0
+    # Brand is detected from the (bare) index name so it stays stable.
     brand = detect_brand(set_name)
-    year = detect_year(set_name, fallback=year)
-    rel_files = ", ".join(str(p.relative_to(ROOT)) for p in sorted(html_paths, key=_page_sort_key))
+    # Year comes from the title's leading (product) year, so a "Retro 1993"
+    # insert of a 2023 product is filed under 2023 — not the embedded 1993 that
+    # detect_year() on the bare name would grab. Falls back to the bare-name
+    # scan then the index year.
+    year = leading_year(display_name) or detect_year(set_name, fallback=year)
+    rel_files = ", ".join(str(p.relative_to(ROOT)) for p in ordered)
     return _load_set(
         conn,
-        brand=brand, sport=sport, year=year, set_name=set_name,
+        brand=brand, sport=sport, year=year, set_name=display_name,
         source="tcdb",
         source_url=source_url or f"https://www.tcdb.com/ViewSet.cfm/sid/{sid}",
         source_file=rel_files,

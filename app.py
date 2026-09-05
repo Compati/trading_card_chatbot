@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import anthropic
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -30,6 +31,95 @@ MODELS = {
 }
 
 MAX_TOOL_ITERATIONS = 8  # safety guard against tool-call loops
+
+EXAMPLE_QUESTIONS = [
+    "Who has more cards, Patrick Mahomes or Josh Allen?",
+    "Show Brock Purdy's cards year by year",
+    "Who has the most autographs in 2022 Chronicles Draft Picks?",
+    "What autos does Victor Wembanyama have?",
+]
+
+
+# ─── Tool-result rendering (tables + charts instead of raw JSON) ───────────────
+def _df(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _table(rows: list[dict], cols: list[str] | None = None) -> None:
+    df = _df(rows)
+    if df.empty:
+        st.caption("_no rows_")
+        return
+    if cols:
+        df = df[[c for c in cols if c in df.columns]]
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+
+def render_tool_result(name: str, result: dict) -> None:
+    """Render a tool result as tables/charts by tool type; raw JSON stays available."""
+    if not isinstance(result, dict) or result.get("error"):
+        st.error(result.get("error") if isinstance(result, dict) else str(result))
+        return
+
+    if name == "player_timeline":
+        st.caption(f"**{result.get('name')}** — {result.get('total', 0):,} cards total")
+        tl = result.get("timeline", [])
+        if tl:
+            st.bar_chart(_df(tl), x="year", y="cards", height=200)
+            _table(tl, ["year", "cards", "autos", "relics", "rookies", "sets"])
+
+    elif name == "compare_players":
+        comp = result.get("comparison", [])
+        _table(comp, ["name", "total", "autos", "relics", "rookies", "distinct_sets"])
+        if comp:
+            st.bar_chart(_df(comp), x="name", y="total", height=200)
+
+    elif name == "product_leaders":
+        st.caption(f"Top players by **{result.get('metric')}** in *{result.get('product')}*")
+        _table(result.get("leaders", []), ["full_name", "cards", "autos", "relics"])
+
+    elif name == "count_cards":
+        st.caption(f"Total: **{result.get('total', 0):,}** cards")
+        if result.get("by_year"):
+            st.bar_chart(_df(result["by_year"]), x="year", y="n", height=180)
+        _table(result.get("by_brand", []), ["brand", "n"])
+
+    elif name == "cards_for_player":
+        st.caption(f"{result.get('count_returned', 0)} cards")
+        _table(result.get("cards", []),
+               ["year", "set_name", "card_number", "parallel_name", "print_run",
+                "is_auto", "is_relic", "team"])
+
+    elif name == "sets_for_player":
+        st.caption(f"{result.get('set_count', 0)} sets")
+        _table(result.get("sets", []), ["year", "set_name", "brand", "sport", "cards_in_set"])
+
+    elif name == "search_sets":
+        st.caption(f"{result.get('count', 0)} sets")
+        _table(result.get("sets", []), ["set_id", "year", "set_name", "brand", "sport", "card_count"])
+
+    elif name == "search_player":
+        _table(result.get("matches", []), ["id", "full_name", "sport", "card_count"])
+
+    elif name == "set_details":
+        s = result.get("set", {})
+        st.caption(f"**{s.get('name')}** — {s.get('card_count', 0)} cards, {s.get('player_count', 0)} players")
+        fam = result.get("product_family")
+        if fam:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Subsets", fam["subset_count"])
+            c2.metric("Family cards", f"{fam['total_cards']:,}")
+            c3.metric("Autos", f"{fam['total_autos']:,}")
+            c4.metric("Relics", f"{fam['total_relics']:,}")
+            _table(fam.get("subsets", []), ["id", "name", "card_count"])
+        elif result.get("sample_players"):
+            _table(result["sample_players"], ["id", "full_name"])
+
+    else:  # db_stats and anything unrecognized
+        st.json(result, expanded=False)
+
+    with st.expander("raw JSON", expanded=False):
+        st.code(json.dumps(result, default=str, indent=2)[:8000], language="json")
 
 # ─── Page setup ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Trading Card Chatbot", page_icon="🃏", layout="wide")
@@ -89,16 +179,29 @@ if "messages" not in st.session_state:
     st.session_state.messages = []  # list[ {"role": "user"|"assistant", "content": str|list} ]
 
 # ─── Replay history ───────────────────────────────────────────────────────────
-def _render_message(msg: dict) -> None:
+def _tool_names_by_id(messages: list[dict]) -> dict[str, str]:
+    """Map each tool_use_id -> tool name, so tool_result blocks (which carry only
+    the id) can be rendered by the right renderer on history replay."""
+    names: dict[str, str] = {}
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                names[block.get("id", "")] = block.get("name", "")
+    return names
+
+
+def _render_message(msg: dict, tool_names: dict[str, str]) -> None:
     """Render one message. Assistant messages may be a list of content blocks
-    (text + tool_use); we show the text and put tool calls in an expander."""
+    (text + tool_use); tool_result blocks are rendered as tables/charts."""
     role = msg["role"]
     with st.chat_message("user" if role == "user" else "assistant"):
         content = msg["content"]
         if isinstance(content, str):
             st.markdown(content)
             return
-        # List of content blocks (Anthropic format)
         for block in content:
             btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
             if btype == "text":
@@ -108,21 +211,33 @@ def _render_message(msg: dict) -> None:
             elif btype == "tool_use":
                 name = block["name"] if isinstance(block, dict) else block.name
                 inp = block["input"] if isinstance(block, dict) else block.input
-                with st.expander(f"🔧 Tool call: `{name}`", expanded=False):
+                with st.expander(f"🔧 `{name}`", expanded=False):
                     st.code(json.dumps(inp, indent=2), language="json")
             elif btype == "tool_result":
-                # Tool results are shown in the user-role message that carries them;
-                # included here only for completeness.
                 tid = block.get("tool_use_id") or ""
-                with st.expander(f"📦 Tool result ({tid[:8]}…)", expanded=False):
-                    st.code(str(block.get("content", ""))[:5000], language="json")
+                name = tool_names.get(tid, "")
+                try:
+                    result = json.loads(block.get("content", "") or "{}")
+                except (ValueError, TypeError):
+                    result = {"raw": str(block.get("content", ""))}
+                render_tool_result(name, result)
 
 
+_tool_names = _tool_names_by_id(st.session_state.messages)
 for msg in st.session_state.messages:
-    _render_message(msg)
+    _render_message(msg, _tool_names)
+
+# ─── Example prompts (only on an empty chat) ──────────────────────────────────
+if not st.session_state.messages and "pending_q" not in st.session_state:
+    st.markdown("**Try one of these:**")
+    cols = st.columns(2)
+    for i, q in enumerate(EXAMPLE_QUESTIONS):
+        if cols[i % 2].button(q, use_container_width=True, key=f"ex_{i}"):
+            st.session_state.pending_q = q
+            st.rerun()
 
 # ─── Input ────────────────────────────────────────────────────────────────────
-user_input = st.chat_input("Ask about a player, a set, a year…")
+user_input = st.chat_input("Ask about a player, a set, a year…") or st.session_state.pop("pending_q", None)
 if user_input:
     if not api_key:
         st.error("Add your Anthropic API key in the sidebar first.")
@@ -175,7 +290,7 @@ if user_input:
                     if block["type"] == "text" and block["text"]:
                         st.markdown(block["text"])
                     elif block["type"] == "tool_use":
-                        with st.expander(f"🔧 Tool call: `{block['name']}`", expanded=False):
+                        with st.expander(f"🔧 `{block['name']}`", expanded=False):
                             st.code(json.dumps(block["input"], indent=2), language="json")
 
                 if resp.stop_reason != "tool_use" or not tool_uses:
@@ -193,8 +308,7 @@ if user_input:
                         "tool_use_id": tu["id"],
                         "content": serialized,
                     })
-                    with st.expander(f"📦 Result: `{tu['name']}`", expanded=False):
-                        st.code(serialized[:8000], language="json")
+                    render_tool_result(tu["name"], result)
 
                 user_followup = {"role": "user", "content": tool_results}
                 st.session_state.messages.append(user_followup)

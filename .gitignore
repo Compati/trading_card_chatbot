@@ -19,3 +19,6 @@ data/scrape_status.json
 
 # Local scrape/scratch logs (download, ingest, measurement runs)
 data/_*.txt
+
+# Claude Code local tooling (per-machine launch config etc.)
+.claude/

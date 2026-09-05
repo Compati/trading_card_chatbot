@@ -52,7 +52,7 @@ def _table(rows: list[dict], cols: list[str] | None = None) -> None:
         return
     if cols:
         df = df[[c for c in cols if c in df.columns]]
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width="stretch")
 
 
 def render_tool_result(name: str, result: dict) -> None:
@@ -232,7 +232,7 @@ if not st.session_state.messages and "pending_q" not in st.session_state:
     st.markdown("**Try one of these:**")
     cols = st.columns(2)
     for i, q in enumerate(EXAMPLE_QUESTIONS):
-        if cols[i % 2].button(q, use_container_width=True, key=f"ex_{i}"):
+        if cols[i % 2].button(q, width="stretch", key=f"ex_{i}"):
             st.session_state.pending_q = q
             st.rerun()
 
@@ -261,19 +261,33 @@ if user_input:
         try:
             for iteration in range(MAX_TOOL_ITERATIONS):
                 status.update(label=f"Calling Claude (iteration {iteration + 1})…")
-                resp = client.messages.create(
+                # Stream the text so the answer appears as it's written; the
+                # assembled final message still gives us tool_use blocks + stop.
+                text_ph = st.empty()
+                streamed = ""
+                with client.messages.stream(
                     model=model_id,
                     max_tokens=2048,
                     system=SYSTEM_PROMPT,
                     tools=TOOL_SCHEMAS,
                     messages=api_messages,
-                )
+                ) as stream:
+                    for delta in stream.text_stream:
+                        streamed += delta
+                        text_ph.markdown(streamed + "▌")
+                    final = stream.get_final_message()
+                # NB: use if/else statements, not a bare ternary expression —
+                # Streamlit "magic" would auto-render a bare expression's value.
+                if streamed:
+                    text_ph.markdown(streamed)
+                else:
+                    text_ph.empty()
 
                 # Convert content blocks to serializable dicts so we can stash
                 # them in session_state and re-send next turn.
                 assistant_content = []
                 tool_uses = []
-                for block in resp.content:
+                for block in final.content:
                     if block.type == "text":
                         assistant_content.append({"type": "text", "text": block.text})
                     elif block.type == "tool_use":
@@ -285,15 +299,13 @@ if user_input:
                 st.session_state.messages.append({"role": "assistant", "content": assistant_content})
                 api_messages.append({"role": "assistant", "content": assistant_content})
 
-                # Render whatever text + tool_use blocks just landed
+                # Text is already on screen from the stream; just show tool calls.
                 for block in assistant_content:
-                    if block["type"] == "text" and block["text"]:
-                        st.markdown(block["text"])
-                    elif block["type"] == "tool_use":
+                    if block["type"] == "tool_use":
                         with st.expander(f"🔧 `{block['name']}`", expanded=False):
                             st.code(json.dumps(block["input"], indent=2), language="json")
 
-                if resp.stop_reason != "tool_use" or not tool_uses:
+                if final.stop_reason != "tool_use" or not tool_uses:
                     status.update(label="Done", state="complete")
                     break
 

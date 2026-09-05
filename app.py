@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 import anthropic
@@ -121,6 +122,33 @@ def render_tool_result(name: str, result: dict) -> None:
     with st.expander("raw JSON", expanded=False):
         st.code(json.dumps(result, default=str, indent=2)[:8000], language="json")
 
+
+def conversation_to_markdown(messages: list[dict]) -> str:
+    """Serialize the chat to readable Markdown: your questions, Claude's text
+    answers, and a note of which tools it called. Tool-result payloads are
+    omitted (they're rendered live but would bloat an export)."""
+    lines = ["# Trading Card Chatbot — conversation", ""]
+    for m in messages:
+        content = m["content"]
+        if m["role"] == "user" and isinstance(content, str):
+            lines += [f"**You:** {content}", ""]
+            continue
+        if m["role"] == "user":
+            continue  # tool_result blocks — skip
+        # assistant: gather text + tool-call names
+        texts, tools_used = [], []
+        for block in content if isinstance(content, list) else []:
+            btype = block.get("type") if isinstance(block, dict) else None
+            if btype == "text" and block.get("text"):
+                texts.append(block["text"])
+            elif btype == "tool_use":
+                tools_used.append(block.get("name", ""))
+        if texts:
+            lines += [f"**Assistant:** {' '.join(texts)}", ""]
+        if tools_used:
+            lines += [f"_(tools used: {', '.join(dict.fromkeys(tools_used))})_", ""]
+    return "\n".join(lines)
+
 # ─── Page setup ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Trading Card Chatbot", page_icon="🃏", layout="wide")
 st.title("🃏 Trading Card Chatbot")
@@ -170,7 +198,18 @@ with st.sidebar:
         st.error(f"DB stats unavailable: {e}")
 
     st.divider()
-    if st.button("Clear chat"):
+    _msgs = st.session_state.get("messages", [])
+    col_dl, col_clear = st.columns(2)
+    col_dl.download_button(
+        "⬇︎ Export",
+        data=conversation_to_markdown(_msgs) if _msgs else "",
+        file_name=f"card-chat-{date.today():%Y%m%d}.md",
+        mime="text/markdown",
+        disabled=not _msgs,
+        width="stretch",
+        help="Download this conversation as Markdown",
+    )
+    if col_clear.button("Clear chat", width="stretch"):
         st.session_state.messages = []
         st.rerun()
 
@@ -267,7 +306,7 @@ if user_input:
                 streamed = ""
                 with client.messages.stream(
                     model=model_id,
-                    max_tokens=2048,
+                    max_tokens=4096,
                     system=SYSTEM_PROMPT,
                     tools=TOOL_SCHEMAS,
                     messages=api_messages,

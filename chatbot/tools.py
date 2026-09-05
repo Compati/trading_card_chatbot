@@ -358,6 +358,101 @@ def db_stats() -> dict:
         conn.close()
 
 
+def compare_players(player_ids: list[int], year: int | None = None) -> dict:
+    """Side-by-side totals for two or more players (resolve ids via search_player first)."""
+    conn = get_connection(read_only=True)
+    try:
+        rows_out = []
+        for pid in player_ids:
+            where = ["c.player_id = ?"]
+            params: list[Any] = [pid]
+            if year:
+                where.append("s.year = ?")
+                params.append(year)
+            w = " AND ".join(where)
+            agg = conn.execute(
+                f"SELECT COUNT(*) AS total, COALESCE(SUM(c.is_auto),0) AS autos, "
+                f"       COALESCE(SUM(c.is_relic),0) AS relics, COALESCE(SUM(c.is_rookie),0) AS rookies, "
+                f"       COUNT(DISTINCT c.set_id) AS sets "
+                f"FROM cards c JOIN sets s ON s.id=c.set_id WHERE {w}",
+                tuple(params),
+            ).fetchone()
+            name = conn.execute("SELECT full_name FROM players WHERE id=?", (pid,)).fetchone()
+            rows_out.append({
+                "player_id": pid,
+                "name": name["full_name"] if name else None,
+                "total": agg["total"], "autos": agg["autos"], "relics": agg["relics"],
+                "rookies": agg["rookies"], "distinct_sets": agg["sets"],
+            })
+        return {"year": year, "comparison": rows_out}
+    finally:
+        conn.close()
+
+
+def player_timeline(player_id: int) -> dict:
+    """Per-year card counts for one player (with auto/relic/rookie + set breakdown)."""
+    conn = get_connection(read_only=True)
+    try:
+        name = conn.execute("SELECT full_name FROM players WHERE id=?", (player_id,)).fetchone()
+        timeline = _rows(
+            conn,
+            "SELECT s.year, COUNT(*) AS cards, COALESCE(SUM(c.is_auto),0) AS autos, "
+            "       COALESCE(SUM(c.is_relic),0) AS relics, COALESCE(SUM(c.is_rookie),0) AS rookies, "
+            "       COUNT(DISTINCT c.set_id) AS sets "
+            "FROM cards c JOIN sets s ON s.id=c.set_id WHERE c.player_id=? "
+            "GROUP BY s.year ORDER BY s.year",
+            (player_id,),
+        )
+        total = sum(r["cards"] for r in timeline)
+        return {"player_id": player_id, "name": name["full_name"] if name else None,
+                "total": total, "timeline": timeline}
+    finally:
+        conn.close()
+
+
+def product_leaders(product_query: str | None = None, set_id: int | None = None,
+                    metric: str = "cards", limit: int = 15) -> dict:
+    """Top players across a whole product family (base + all its subsets).
+
+    Give either `set_id` (any set in the family — resolved to its product) or
+    `product_query` (a product-name substring, e.g. 'Chronicles Draft Picks').
+    `metric` ranks by 'cards' (default), 'autos', or 'relics'.
+    """
+    metric_col = {"cards": "COUNT(*)", "autos": "COALESCE(SUM(c.is_auto),0)",
+                  "relics": "COALESCE(SUM(c.is_relic),0)"}.get(metric)
+    if metric_col is None:
+        return {"error": "metric must be 'cards', 'autos', or 'relics'"}
+    conn = get_connection(read_only=True)
+    try:
+        if set_id is not None:
+            prod = conn.execute("SELECT COALESCE(parent_set_id, id) AS pid FROM sets WHERE id=?",
+                                (set_id,)).fetchone()
+            if not prod:
+                return {"error": f"set_id {set_id} not found"}
+            pid = prod["pid"]
+            family_sql = "(s.id = ? OR s.parent_set_id = ?)"
+            fam_params: list[Any] = [pid, pid]
+            label = conn.execute("SELECT name FROM sets WHERE id=?", (pid,)).fetchone()["name"]
+        elif product_query:
+            family_sql = "s.name LIKE ?"
+            fam_params = [f"%{product_query}%"]
+            label = product_query
+        else:
+            return {"error": "provide product_query or set_id"}
+        leaders = _rows(
+            conn,
+            f"SELECT p.id AS player_id, p.full_name, "
+            f"       COUNT(*) AS cards, COALESCE(SUM(c.is_auto),0) AS autos, "
+            f"       COALESCE(SUM(c.is_relic),0) AS relics "
+            f"FROM cards c JOIN sets s ON s.id=c.set_id JOIN players p ON p.id=c.player_id "
+            f"WHERE {family_sql} GROUP BY p.id ORDER BY {metric_col} DESC, cards DESC LIMIT ?",
+            tuple(fam_params) + (limit,),
+        )
+        return {"product": label, "metric": metric, "leaders": leaders}
+    finally:
+        conn.close()
+
+
 # ---------- Anthropic tool-use schemas ----------
 
 TOOL_SCHEMAS = [
@@ -484,6 +579,50 @@ TOOL_SCHEMAS = [
             "required": ["set_id"],
         },
     },
+    {
+        "name": "compare_players",
+        "description": (
+            "Compare two or more players side-by-side: total cards, autographs, relics, rookies, "
+            "and distinct sets (optionally for one year). Resolve each name with search_player first, "
+            "then pass the ids. Use for 'who has more cards, X or Y?'."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player_ids": {"type": "array", "items": {"type": "integer"},
+                               "description": "Two or more player ids from search_player"},
+                "year": {"type": "integer", "description": "Optional: restrict the comparison to one year"},
+            },
+            "required": ["player_ids"],
+        },
+    },
+    {
+        "name": "player_timeline",
+        "description": (
+            "Per-year breakdown for one player: cards, autographs, relics, rookies, and distinct "
+            "sets each year. Use for 'how has X's card output changed over time' or a career/rookie arc."),
+        "input_schema": {
+            "type": "object",
+            "properties": {"player_id": {"type": "integer"}},
+            "required": ["player_id"],
+        },
+    },
+    {
+        "name": "product_leaders",
+        "description": (
+            "Top players across a whole PRODUCT family (base set + all its inserts/parallels/autos). "
+            "Give product_query (a product-name substring like 'Chronicles Draft Picks' or '2024 Prizm') "
+            "or a set_id from that family. Rank by metric: 'cards' (default), 'autos', or 'relics'. "
+            "Use for 'who has the most autos in <product>' or 'biggest names in <product>'."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "product_query": {"type": "string", "description": "Product-name substring (sweeps base + subsets)"},
+                "set_id": {"type": "integer", "description": "Alternative to product_query: any set in the family"},
+                "metric": {"type": "string", "enum": ["cards", "autos", "relics"], "description": "Ranking metric (default 'cards')"},
+                "limit": {"type": "integer", "description": "Max players to return (default 15)"},
+            },
+        },
+    },
 ]
 
 
@@ -495,6 +634,9 @@ TOOLS = {
     "count_cards": count_cards,
     "search_sets": search_sets,
     "set_details": set_details,
+    "compare_players": compare_players,
+    "player_timeline": player_timeline,
+    "product_leaders": product_leaders,
 }
 
 

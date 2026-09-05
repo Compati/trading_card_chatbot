@@ -24,6 +24,9 @@ one and mention it.
    - "Show me X's 2024 cards" → `cards_for_player` with year/set filters
    - "Find X's autos/autographs/relics/rookies" → `cards_for_player` with `is_auto=true`, `is_relic=true`, or `is_rookie=true`
    - "What's in 2024 Donruss Football?" → `search_sets` then `set_details`
+   - "Who has more cards, X or Y?" → `search_player` for each, then `compare_players`
+   - "How has X's output changed over the years?" / rookie-to-now arc → `player_timeline`
+   - "Who has the most autos/cards in <product>?" → `product_leaders` (pass the product name)
 
 4. **Products contain subsets — roll them up.** A Panini "set" the user names \
 (e.g. "2022 Chronicles Draft Picks") is usually a *product* whose base checklist \

@@ -45,6 +45,7 @@ class ParsedCard:
 _PERSON_RE = re.compile(r"/Person\.cfm/pid/\d+", re.IGNORECASE)
 _VIEWCARD_RE = re.compile(r"/ViewCard\.cfm/", re.IGNORECASE)
 _TEAM_RE = re.compile(r"/Team\.cfm/tid/\d+", re.IGNORECASE)
+_PROFILE_RE = re.compile(r"/Profile\.cfm/", re.IGNORECASE)
 
 
 def parse_tcdb_html(html: str) -> list[ParsedCard]:
@@ -81,8 +82,15 @@ def _parse_by_links(soup: BeautifulSoup) -> list[ParsedCard]:
         person = tr.find("a", href=_PERSON_RE)
         if person is None:
             continue
+        # Skip the page-footer "Recently Added" widget. Its rows carry a
+        # "<date> by <user>" byline linking to /Profile.cfm and often a
+        # "(External Link - Person)" placeholder person; on out-of-range pages
+        # they're the ONLY /Person.cfm rows present. Real checklist rows never
+        # link to a user profile, so a Profile link in the row = not a card.
+        if tr.find("a", href=_PROFILE_RE):
+            continue
         raw_player = person.get_text(" ", strip=True)
-        if not raw_player:
+        if not raw_player or raw_player.startswith("(External Link"):
             continue
         seen_rows += 1
 

@@ -105,7 +105,16 @@ def _group_sets(rows: list[dict]) -> dict[tuple, list[dict]]:
 
 def _set_name(year: int, brand_field: str, program: str) -> str:
     # "2025 Panini Court Kings" — brand_field is Panini's manufacturer column.
-    return f"{year} {brand_field.strip()} {program}".strip()
+    # Guard: some Panini products carry the maker in the PROGRAM itself
+    # ("Panini Intl France"), which would double the brand into
+    # "2026 Panini Panini Intl France" — drop the prefix when the program
+    # already leads with it.
+    brand_field = brand_field.strip()
+    program = program.strip()
+    low_b = brand_field.lower()
+    if program.lower() == low_b or program.lower().startswith(low_b + " "):
+        return f"{year} {program}".strip()
+    return f"{year} {brand_field} {program}".strip()
 
 
 def summarize(rows: list[dict]) -> None:

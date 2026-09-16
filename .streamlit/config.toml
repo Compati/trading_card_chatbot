@@ -1,0 +1,9 @@
+# Trading Card Chatbot theme — a "premium card" dark palette:
+# deep charcoal-navy ground with a warm gold accent (evokes gold parallels).
+[theme]
+base = "dark"
+primaryColor = "#e0a94a"
+backgroundColor = "#0e1016"
+secondaryBackgroundColor = "#181b24"
+textColor = "#e7e9f0"
+font = "sans serif"

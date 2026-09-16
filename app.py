@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from dotenv import load_dotenv
 # Make sibling packages importable when streamlit runs us from the project root.
 sys.path.insert(0, str(Path(__file__).parent))
 
+from chatbot import conversations
 from chatbot.system_prompt import SYSTEM_PROMPT
 from chatbot.tools import TOOL_SCHEMAS, dispatch, db_stats
 from db.connection import DB_PATH, init_db
@@ -150,15 +152,127 @@ def conversation_to_markdown(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 # ─── Page setup ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Trading Card Chatbot", page_icon="🃏", layout="wide")
-st.title("🃏 Trading Card Chatbot")
-st.caption("Ask about Panini cards, players, and sets. Answers come from a local SQLite database.")
+st.set_page_config(page_title="Trading Card Chatbot", layout="wide")
+
+CUSTOM_CSS = """
+<style>
+  /* Header banner */
+  .tcc-header { margin:.2rem 0 .1rem; }
+  .tcc-title  {
+    font-size:2.15rem; font-weight:800; letter-spacing:-.02em; line-height:1.05;
+    background:linear-gradient(92deg,#f4d488 0%,#e0a94a 45%,#c98a2e 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  .tcc-sub { color:#9aa0b0; font-size:.92rem; margin-top:.15rem; }
+  .tcc-rule { height:2px; border:0; margin:.6rem 0 1.1rem;
+    background:linear-gradient(90deg,rgba(224,169,74,.55),rgba(224,169,74,0) 70%); }
+
+  /* Buttons as chips — rounded, subtle gold border, warm hover */
+  .stButton > button {
+    border-radius:10px; border:1px solid rgba(224,169,74,.22);
+    transition:border-color .12s ease, background-color .12s ease, transform .04s ease;
+  }
+  .stButton > button:hover {
+    border-color:rgba(224,169,74,.7); background-color:rgba(224,169,74,.08);
+  }
+  .stButton > button:active { transform:translateY(1px); }
+
+  /* Chat bubbles — soft rounded card with a thin border */
+  [data-testid="stChatMessage"] {
+    border:1px solid rgba(255,255,255,.06); border-radius:14px;
+    padding:.35rem .65rem; margin-bottom:.35rem;
+  }
+
+  /* Sidebar section headings + metrics */
+  [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color:#e0a94a; }
+  [data-testid="stMetricValue"] { font-size:1.35rem; }
+
+  /* Slightly tighter top padding on the main pane */
+  .block-container { padding-top:2.2rem; }
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+st.markdown(
+    """
+    <div class="tcc-header">
+      <div>
+        <div class="tcc-title">Trading Card Chatbot</div>
+        <div class="tcc-sub">Ask about Panini cards, players &amp; sets — every answer grounded in a local SQLite database.</div>
+      </div>
+    </div>
+    <hr class="tcc-rule" />
+    """,
+    unsafe_allow_html=True,
+)
 
 # ─── DB bootstrap ─────────────────────────────────────────────────────────────
 if not DB_PATH.exists():
     st.warning(f"No database at `{DB_PATH}`. Initializing an empty one — "
                f"run the scraper + ingest to populate it (see README).")
     init_db()
+
+# ─── Conversation state + persistence ─────────────────────────────────────────
+# One active conversation lives in session_state; it's mirrored to a JSON file
+# (chatbot/conversations.py) so saved chats survive reruns and server restarts.
+if "conv_id" not in st.session_state:
+    st.session_state.conv_id = conversations.new_id()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "conv_title" not in st.session_state:
+    st.session_state.conv_title = "New chat"
+if "conv_title_custom" not in st.session_state:
+    st.session_state.conv_title_custom = False
+
+
+def _persist() -> None:
+    """Save the active conversation to disk (empty chats are not written)."""
+    if not st.session_state.conv_title_custom:
+        st.session_state.conv_title = conversations.title_from_messages(
+            st.session_state.messages)
+    conversations.save(st.session_state.conv_id,
+                       st.session_state.conv_title,
+                       st.session_state.messages)
+
+
+def _new_chat() -> None:
+    _persist()  # keep whatever the current chat already has
+    st.session_state.conv_id = conversations.new_id()
+    st.session_state.messages = []
+    st.session_state.conv_title = "New chat"
+    st.session_state.conv_title_custom = False
+
+
+def _load_chat(cid: str) -> None:
+    _persist()  # save current before switching away
+    data = conversations.load(cid)
+    if data:
+        st.session_state.conv_id = data["id"]
+        st.session_state.messages = data.get("messages", [])
+        st.session_state.conv_title = data.get("title", "New chat")
+        st.session_state.conv_title_custom = True  # respect the saved title
+
+
+def _delete_chat(cid: str) -> None:
+    conversations.delete(cid)
+    if cid == st.session_state.conv_id:  # deleted the active one → start fresh
+        st.session_state.conv_id = conversations.new_id()
+        st.session_state.messages = []
+        st.session_state.conv_title = "New chat"
+        st.session_state.conv_title_custom = False
+
+
+def _ago(ts: float) -> str:
+    if not ts:
+        return ""
+    d = time.time() - ts
+    if d < 60:
+        return "just now"
+    if d < 3600:
+        return f"{int(d // 60)}m ago"
+    if d < 86400:
+        return f"{int(d // 3600)}h ago"
+    return f"{int(d // 86400)}d ago"
+
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -182,6 +296,60 @@ with st.sidebar:
     model_id = MODELS[model_label]
 
     st.divider()
+    st.subheader("Conversations")
+
+    if st.button("➕  New chat", width="stretch"):
+        _new_chat()
+        st.rerun()
+
+    # Rename the active conversation (auto-titled from the first question until
+    # you type your own). The widget key includes the current title so that when
+    # the title changes programmatically (auto-derive, or switching chats) the
+    # box re-initialises with the new value instead of retaining a stale one — a
+    # common Streamlit pitfall. Renames commit via on_change (fires only on a
+    # real user edit), so the auto-derived title is never clobbered.
+    _title_key = f"title_{st.session_state.conv_id}_{st.session_state.conv_title}"
+
+    def _rename() -> None:
+        v = (st.session_state.get(_title_key) or "").strip()
+        if v and v != st.session_state.conv_title:
+            st.session_state.conv_title = v
+            st.session_state.conv_title_custom = True
+            if st.session_state.messages:
+                _persist()
+
+    st.text_input(
+        "Chat title",
+        value=st.session_state.conv_title,
+        key=_title_key,
+        on_change=_rename,
+        label_visibility="collapsed",
+        placeholder="Chat title…",
+    )
+
+    saved = conversations.list_all()
+    if saved:
+        st.caption(f"{len(saved)} saved")
+        for c in saved:
+            active = c["id"] == st.session_state.conv_id
+            col_open, col_del = st.columns([6, 1], gap="small")
+            label = ("● " if active else "") + c["title"]
+            if col_open.button(
+                label,
+                key=f"open_{c['id']}",
+                width="stretch",
+                disabled=active,
+                help=f"{c['turns']} question(s) · {_ago(c['updated'])}",
+            ):
+                _load_chat(c["id"])
+                st.rerun()
+            if col_del.button("🗑", key=f"del_{c['id']}", help="Delete this chat"):
+                _delete_chat(c["id"])
+                st.rerun()
+    else:
+        st.caption("No saved chats yet — ask a question to start one.")
+
+    st.divider()
     st.subheader("Database")
     try:
         stats = db_stats()
@@ -199,9 +367,8 @@ with st.sidebar:
 
     st.divider()
     _msgs = st.session_state.get("messages", [])
-    col_dl, col_clear = st.columns(2)
-    col_dl.download_button(
-        "⬇︎ Export",
+    st.download_button(
+        "⬇︎  Export this chat",
         data=conversation_to_markdown(_msgs) if _msgs else "",
         file_name=f"card-chat-{date.today():%Y%m%d}.md",
         mime="text/markdown",
@@ -209,13 +376,6 @@ with st.sidebar:
         width="stretch",
         help="Download this conversation as Markdown",
     )
-    if col_clear.button("Clear chat", width="stretch"):
-        st.session_state.messages = []
-        st.rerun()
-
-# ─── Chat state ───────────────────────────────────────────────────────────────
-if "messages" not in st.session_state:
-    st.session_state.messages = []  # list[ {"role": "user"|"assistant", "content": str|list} ]
 
 # ─── Replay history ───────────────────────────────────────────────────────────
 def _tool_names_by_id(messages: list[dict]) -> dict[str, str]:
@@ -374,3 +534,8 @@ if user_input:
         except Exception as e:
             status.update(label="Error", state="error")
             st.error(f"{type(e).__name__}: {e}")
+
+    # Save the conversation (with this completed turn) to disk, and refresh the
+    # sidebar list / title so a brand-new chat shows up immediately.
+    _persist()
+    st.rerun()

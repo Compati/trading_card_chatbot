@@ -5,22 +5,90 @@ steps. Newest session first.
 
 ---
 
-## Current state (as of 2026-08-31)
+## Current state (as of 2026-09-15)
 
-- **Repo:** github.com/Compati/trading_card_chatbot — `origin/main` = `4687938`.
-- **Database** (`db/cards.db`, git-tracked, ~42.5 MB):
-  - **13,845 sets / 516,619 cards / 9,733 players / 925 teams**
-  - Sports: **football + basketball** deepened to subset level for **2020–2025**;
-    baseball present at top-level only (Panini has no MLB license — low value).
-  - Integrity: 0 duplicate sets, 0 orphan players, `players_fts` in sync,
-    0 empty-in-DB sets, 0 junk sets (>800 cards).
-  - `parallel_name` populated on ~76% of cards; `print_run` on ~317k.
-- **Raw HTML** (`data/raw/`, ~1.5–1.8 GB, gitignored, local only): kept on disk.
-  The DB is self-contained and does not need it at runtime; raw is only needed to
-  re-ingest / re-parse. Safe to delete to reclaim space, but keeping it means any
-  future parser change can re-extract for free instead of re-scraping TCDB.
-- **Chatbot:** live Claude tool-use loop verified working (Haiku 4.5 default;
-  Sonnet 5 / Opus 5 accessible). `.env` holds a real `ANTHROPIC_API_KEY`.
+- **Repo:** github.com/Compati/trading_card_chatbot — `origin/main` = `9ffc3b3`
+  (this session's UI work is committed on top; see the 2026-09-15 entry).
+- **Database** (`db/cards.db`, ~57 MB — no longer git-tracked; served as a
+  GitHub Release asset on the rolling `db-latest` release, fetched by
+  `scripts/fetch_db.sh` and published with `scripts/publish_db.py`):
+  - **19,443 sets / 706,410 cards / 17,740 players**
+  - **8 sports:** football (324,709 cards), basketball (174,755), baseball
+    (96,021), soccer (57,678), racing (26,708 NASCAR), UFC/MMA (12,625),
+    WWE (12,609), golf (1,305 LIV). Years ~2016–2026.
+  - Sourced from TCDB (19,421 sets) + Panini-America "Download Full Checklist"
+    CSVs (14 sets — premium 2025-26 bball flagships TCDB left empty, plus
+    WC-2026 soccer). Parent/subset hierarchy built (`parent_set_id`).
+  - Integrity clean: 0 rival-maker sets, 0 dup groups, `players_fts` in sync.
+- **Chatbot:** Streamlit chat, live Claude tool-use loop (Haiku 4.5 default;
+  Sonnet 5 / Opus 5 selectable). `.env` holds a real `ANTHROPIC_API_KEY`.
+  10 SQL-backed tools; tool results render as tables/charts. **Now themed
+  (gold-on-charcoal) with saved/named conversations** (see 2026-09-15).
+- **Known data caveat:** ~1.3k cards of contamination were identified but left
+  in per an earlier decision (Finest Overtime Elite, sticker albums, indie
+  one-offs). Purge available on request — use an explicit set-id list.
+
+---
+
+## Session 2026-09-15 — chatbot UI: theme + conversation management
+
+Data was already current and republished (DB reconciled: the `db-latest` asset
+matches the local file). Two shipped items this session:
+
+### 1. Fixed the "Panini Panini" doubled-brand set name (commit `9ffc3b3`)
+`ingest/panini_csv._set_name` prepended the manufacturer even when the CSV
+PROGRAM already led with it, yielding "2026 Panini **Panini** Intl France". Added
+a guard (skip the prefix when the program already starts with the brand word) +
+renamed the 3 existing rows to "2026 Panini Intl France/Germany/Mexico".
+
+### 2. Visual theme & polish
+- **`.streamlit/config.toml`** — a "premium card" dark palette: charcoal-navy
+  ground (`#0e1016`) with a warm gold accent (`#e0a94a`). *Requires a server
+  restart to take effect — config.toml is read at startup, not on rerun.*
+- **`app.py`** injects `CUSTOM_CSS`: a gold gradient title header (replacing
+  `st.title`), an accent rule, chip-styled buttons (rounded, gold hover),
+  rounded chat bubbles, gold sidebar section headings. CSS targets stable
+  selectors only (`[data-testid=…]`, `.stButton>button`), no hashed classes.
+- Removed the `🃏` emoji from both the header and the browser tab (`page_icon`)
+  — it rendered as a colorful jester glyph. The tab now falls back to
+  Streamlit's default favicon.
+
+### 3. Conversation management (persistent, survives restarts)
+- **`chatbot/conversations.py`** (new) — one JSON file per chat in a gitignored
+  `conversations/` dir. API: `new_id / title_from_messages / save (skips empty,
+  atomic write, preserves created) / load / delete / list_all`. Unlike
+  `session_state`, these survive reruns, server restarts, and new sessions.
+- **`app.py`** sidebar gained a **Conversations** panel: ➕ New chat, inline
+  rename, saved-chat list (● active marker, per-row 🗑 delete), auto-title from
+  the first question, "N saved" count. Redundant Clear-chat button removed;
+  Export kept. Each completed turn (and new/switch/rename/delete) persists.
+- **Fixed a classic Streamlit trap:** an always-on rename `text_input` retained
+  a stale value across reruns and clobbered the auto-derived title back to
+  "New chat". Fix: the widget key includes the current title (so a programmatic
+  change re-inits the box) and renames commit via an `on_change` callback
+  (fires only on a real edit), never a diff-check.
+
+**Verified live** in the browser: theme renders; auto-title, save, persistence
+across a full reload, switch-and-replay (charts/tables rebuild from stored tool
+results), rename (Enter/blur), and delete (disk-confirmed) all work.
+
+*Dev-server note:* `preview_start` resolves the parent `apps/.claude` launch
+config (pickem), not this project's — launch Streamlit by hand:
+`.venv/Scripts/python.exe -m streamlit run app.py --server.port 8501 --server.headless true`.
+
+### Candidate next steps (from this session)
+- **Favicon:** the tab now shows Streamlit's default. If a custom-but-clean icon
+  is wanted, inject a `<link rel="icon">` (data-URI SVG) or drop a `favicon.png`
+  in `.streamlit/static/` — Streamlit's `page_icon` can't render a blank.
+- **Follow-up suggestion chips:** after each answer, offer 2–3 related questions
+  (was offered in the UI-focus menu; not chosen this round).
+- **Richer result rendering:** auto/relic as badges, `print_run` as `/99`,
+  clickable player/set drill-downs.
+- **Export all conversations** / bulk management (currently per-chat Export).
+- **Contamination purge** (~1.3k cards) if the earlier hold is lifted.
+- **Refresh 2025-26 premium bball** in a few weeks as TCDB catalogues more
+  inserts; ingest **WC-2026 soccer** updates as those pre-release checklists firm
+  up. Reclaim ~2 GB `data/raw/` if disk is needed (DB stands alone).
 
 ---
 
